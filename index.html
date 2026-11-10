@@ -37,6 +37,7 @@ h2{margin:0;font-size:clamp(1.3rem,5vw,1.9rem)}
 .card{background:var(--card);border-radius:28px;padding:clamp(12px,3vw,24px);box-shadow:0 8px 0 rgba(0,0,0,.15)}
 .head{display:flex;justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap}
 .chip{background:var(--orange);color:#fff;border-radius:99px;padding:4px 12px;font-weight:700;font-size:.9rem}
+.note{background:#fff3c4;color:#5c4400;border-radius:18px;padding:10px 14px;margin:0 0 12px;text-align:center;font-weight:600;box-shadow:0 4px 0 rgba(0,0,0,.15)}.note p{margin:0 0 8px}
 #help{margin:.6em 0 1em;font-size:1.05rem;line-height:1.4}
 #msg{min-height:2.6em;margin-top:14px;text-align:center;font-weight:700;font-size:1.1rem;border-radius:16px;padding:8px}
 .msg-ok{background:#c9f7d8;color:#0b5d2a}.msg-bad{background:#ffd9d9;color:#8a1a1a}.msg-info{background:#e3ddff;color:#33237a}
@@ -114,6 +115,10 @@ footer{display:flex;justify-content:space-between;gap:10px;margin-top:16px}
     <div class="stars" id="stars">⭐ 0</div>
   </header>
   <nav class="dots" id="dots" aria-label="Progreso"></nav>
+  <div class="note" id="audioNote" role="alert" hidden>
+    <p>🔇 No logramos reproducir la voz en inglés. Sube el volumen del celular y revisa en Ajustes › Idioma › Salida de texto a voz que esté instalado «Inglés (EE. UU.)». Si abriste la clase dentro de otra app, ábrela en Chrome o Safari.</p>
+    <button class="btn orange" id="audioTry">🔊 Probar de nuevo</button>
+  </div>
   <main class="card">
     <div class="head"><h2 id="title"></h2><span class="chip" id="chip"></span></div>
     <p id="help"></p>
@@ -140,7 +145,33 @@ const kick = (el, cls) => { el.classList.remove(cls); void el.offsetWidth; el.cl
 
 /* ---------- Servicio de audio: voz en inglés americano y efectos ---------- */
 class AudioService {
-  constructor() { this.ctx = null; }
+  constructor() {
+    this.ctx = null; this.voice = null; this.timer = null; this.keep = null;
+    this.warned = false; this.unlocked = false; this.onProblem = () => {};
+    this.supported = 'speechSynthesis' in window && 'SpeechSynthesisUtterance' in window;
+    if (!this.supported) return;
+    this.loadVoices();
+    if (speechSynthesis.addEventListener) speechSynthesis.addEventListener('voiceschanged', () => this.loadVoices());
+    ['click', 'touchend', 'keydown'].forEach(ev => addEventListener(ev, () => this.unlock(), { once: true, passive: true }));
+  }
+  loadVoices() {
+    const voices = speechSynthesis.getVoices();
+    if (!voices.length) return;
+    const isEn = v => /^en/i.test(v.lang);
+    this.voice = voices.find(v => isEn(v) && /us/i.test(v.lang)) || voices.find(isEn) || null;
+  }
+  unlock() {
+    if (this.unlocked) return;
+    this.unlocked = true;
+    try { this.context(); } catch (e) { /* sin audio */ }
+    const ios = /iP(hone|ad|od)/.test(navigator.userAgent) || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
+    if (ios && this.supported) { const u = new SpeechSynthesisUtterance(' '); u.volume = 0; speechSynthesis.speak(u); }
+  }
+  stop() {
+    clearTimeout(this.timer);
+    if (this.supported && (speechSynthesis.speaking || speechSynthesis.pending)) speechSynthesis.cancel();
+  }
+  noVoice() { if (!this.warned) { this.warned = true; this.onProblem(); } }
   context() {
     this.ctx = this.ctx || new (window.AudioContext || window.webkitAudioContext)();
     if (this.ctx.state === 'suspended') this.ctx.resume();
@@ -164,13 +195,23 @@ class AudioService {
     (sounds[name] || []).forEach(n => this.tone(...n));
   }
   speak(text) {
-    if (!('speechSynthesis' in window)) return;
-    speechSynthesis.cancel();
-    const u = new SpeechSynthesisUtterance(text);
-    u.lang = 'en-US'; u.rate = .8; u.pitch = 1.1;
-    const voice = speechSynthesis.getVoices().find(v => v.lang.replace('_', '-') === 'en-US');
-    if (voice) u.voice = voice;
-    speechSynthesis.speak(u);
+    if (!this.supported) return this.noVoice();
+    clearTimeout(this.timer);
+    const synth = speechSynthesis, busy = synth.speaking || synth.pending;
+    if (busy) synth.cancel();
+    this.timer = setTimeout(() => {
+      this.loadVoices();
+      const u = new SpeechSynthesisUtterance(text);
+      u.lang = 'en-US'; u.rate = .8; u.pitch = 1.1; u.volume = 1;
+      if (this.voice) u.voice = this.voice;
+      let started = false;
+      u.onstart = () => { started = true; };
+      u.onerror = e => { if (e.error !== 'canceled' && e.error !== 'interrupted') this.noVoice(); };
+      this.keep = u;
+      synth.resume();
+      synth.speak(u);
+      setTimeout(() => { if (!started && this.keep === u && !synth.speaking && !synth.pending) this.noVoice(); }, 2500);
+    }, busy ? 150 : 0);
   }
 }
 
@@ -603,6 +644,7 @@ const MENU = [['🏠', 'Inicio'], ['📚', 'Vocabulario'], ['❓', 'Quiz'], ['�
 class App {
   constructor() {
     this.audio = new AudioService(); this.stars = 0; this.i = 0; this.current = null;
+    this.audio.onProblem = () => { this.el('audioNote').hidden = false; };
     this.el = id => document.getElementById(id);
     this.ctx = {
       audio: this.audio,
@@ -623,6 +665,7 @@ class App {
   start() {
     this.el('dots').append(...this.steps.map((_, k) => this.menuButton(k)));
     this.neonTitle();
+    this.el('audioTry').onclick = () => { this.el('audioNote').hidden = true; this.audio.warned = false; this.audio.speak('one'); };
     this.el('prev').onclick = () => this.go(this.i - 1);
     this.el('next').onclick = () => this.go(this.i + 1);
     ['🍉', '🌞', '🍦', '🏖️', '🐚', '🍍', '🌴', '🩴'].forEach((e, k) => {
@@ -635,7 +678,7 @@ class App {
   go(i) {
     if (i < 0 || i >= this.steps.length) return;
     if (this.current) this.current.destroy();
-    if ('speechSynthesis' in window) speechSynthesis.cancel();
+    this.audio.stop();
     this.i = i; this.current = this.steps[i](this.ctx);
     const a = this.current, stage = this.el('stage');
     this.el('title').textContent = a.title;
